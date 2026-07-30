@@ -1,0 +1,106 @@
+/*
+
+Azure Subscription Inventory Export
+
+This Bash script generates a CSV inventory of all enabled Azure subscriptions within the authenticated tenant. It uses the Azure CLI to enumerate subscriptions and extracts the Owner value from subscription tags.
+
+The generated report includes:
+
+Subscription Name
+Subscription ID
+Owner (from the Owner or owner subscription tag)
+Report Date
+
+The script automatically:
+
+Verifies that the Azure CLI is installed.
+Authenticates the user if no active Azure session exists.
+Processes all enabled subscriptions.
+Exports the results to a timestamped CSV file.
+Displays progress while generating the report.
+Prerequisites
+Azure CLI 2.x or later
+Read access to the target Azure subscriptions
+Permission to read subscription tags
+Usage
+chmod +x export-subscriptions.sh
+./export-subscriptions.sh
+Output
+
+A timestamped CSV file is created in the current directory:
+
+Azure_Subscriptions_YYYYMMDD_HHMMSS.csv
+
+Example:
+
+Subscription Name	Subscription ID	Owner	Report Date
+Production	xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx	John Smith	2026-07-30
+Development	xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx	Platform Team	2026-07-30
+Notes
+The script first attempts to read the Owner tag and falls back to owner if necessary.
+If neither tag exists, the value N/A is written to the report.
+Only subscriptions in the Enabled state are included.
+The script does not modify any Azure resources; it performs read-only operations.
+Typical Use Cases
+Azure governance and subscription inventory
+Cloud asset management
+Cost management ownership validation
+Subscription documentation
+Security and compliance reporting
+Enterprise Azure audits
+
+
+*/
+
+#!/bin/bash
+
+set -euo pipefail
+
+OUTPUT_FILE="Azure_Subscriptions_$(date +%Y%m%d_%H%M%S).csv"
+
+# Check Azure CLI
+if ! command -v az >/dev/null 2>&1; then
+    echo "ERROR: Azure CLI is not installed."
+    exit 1
+fi
+
+# Login if needed
+if ! az account show >/dev/null 2>&1; then
+    echo "Logging into Azure..."
+    az login
+fi
+
+echo "Generating report..."
+
+echo "SubscriptionName,SubscriptionId,Owner,ReportDate" > "$OUTPUT_FILE"
+
+az account list \
+    --all \
+    --query "[?state=='Enabled'].{name:name,id:id}" \
+    -o tsv | while IFS=$'\t' read -r SUB_NAME SUB_ID
+do
+    echo "Processing: $SUB_NAME"
+
+    OWNER=$(az tag list \
+        --resource-id "/subscriptions/${SUB_ID}" \
+        --query "properties.tags.Owner" \
+        -o tsv 2>/dev/null || true)
+
+    if [[ -z "$OWNER" ]]; then
+        OWNER=$(az tag list \
+            --resource-id "/subscriptions/${SUB_ID}" \
+            --query "properties.tags.owner" \
+            -o tsv 2>/dev/null || true)
+    fi
+
+    [[ -z "$OWNER" ]] && OWNER="N/A"
+
+    echo "\"$SUB_NAME\",\"$SUB_ID\",\"$OWNER\",\"$(date +%F)\"" >> "$OUTPUT_FILE"
+
+done
+
+echo ""
+echo "========================================="
+echo "Report successfully generated:"
+echo "  $OUTPUT_FILE"
+echo "========================================="
