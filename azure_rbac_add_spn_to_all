@@ -1,0 +1,157 @@
+/* 
+GitHub README Description
+Azure Service Principal RBAC Assignment Checker
+
+This Bash script verifies whether an existing Azure Service Principal has a specific RBAC role assigned across all enabled Azure subscriptions.
+
+Features
+Verifies Azure CLI authentication.
+Locates an existing Service Principal by display name.
+Enumerates all enabled Azure subscriptions.
+Checks whether the specified RBAC role is assigned.
+Produces a clear compliance report.
+Returns exit codes suitable for automation and CI/CD pipelines.
+Requirements
+Azure CLI 2.x
+Authenticated Azure session (az login)
+Microsoft Entra ID read permissions
+Permission to read Azure RBAC role assignments (e.g., Reader or higher)
+Exit Codes
+Exit Code	Description
+0	All enabled subscriptions contain the required role assignment.
+1	One or more subscriptions are missing the required role assignment.
+2	Verification failed due to Azure CLI or permission errors.
+
+This makes the script suitable for enterprise governance, Azure compliance validation, onboarding verification, and CI/CD health checks.
+
+*/
+
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+SPN_NAME="ABC SPN jeden"
+ROLE_NAME="Cost Management Contributor"
+
+echo "============================================================"
+echo "Azure RBAC Assignment Verification"
+echo "Service Principal: $SPN_NAME"
+echo "Role:              $ROLE_NAME"
+echo "============================================================"
+echo
+
+# Verify Azure CLI authentication
+if ! az account show >/dev/null 2>&1; then
+    echo "ERROR: You are not logged in to Azure CLI."
+    echo "Run: az login"
+    exit 1
+fi
+
+# Retrieve the Object ID of the existing Service Principal
+SP_OBJECT_IDS=$(az ad sp list \
+    --filter "displayName eq '$SPN_NAME'" \
+    --query "[].id" \
+    --output tsv)
+
+SP_COUNT=$(printf '%s\n' "$SP_OBJECT_IDS" | sed '/^$/d' | wc -l | tr -d ' ')
+
+if [[ "$SP_COUNT" -eq 0 ]]; then
+    echo "ERROR: Service Principal not found: $SPN_NAME"
+    exit 1
+fi
+
+if [[ "$SP_COUNT" -gt 1 ]]; then
+    echo "ERROR: Multiple Service Principals found with the same display name."
+    echo
+    echo "Matching Object IDs:"
+    printf '%s\n' "$SP_OBJECT_IDS"
+    exit 1
+fi
+
+SP_OBJECT_ID="$SP_OBJECT_IDS"
+
+echo "Service Principal found."
+echo "Object ID: $SP_OBJECT_ID"
+echo
+
+# Retrieve all enabled Azure subscriptions
+SUBSCRIPTIONS=$(az account list \
+    --all \
+    --query "[?state=='Enabled'].[id,name]" \
+    --output tsv)
+
+if [[ -z "$SUBSCRIPTIONS" ]]; then
+    echo "ERROR: No enabled Azure subscriptions were found."
+    exit 1
+fi
+
+ASSIGNED_COUNT=0
+MISSING_COUNT=0
+ERROR_COUNT=0
+TOTAL_COUNT=0
+
+printf "%-42s %-38s %-12s\n" \
+    "SUBSCRIPTION" "SUBSCRIPTION ID" "STATUS"
+
+printf "%-42s %-38s %-12s\n" \
+    "------------------------------------------" \
+    "--------------------------------------" \
+    "------------"
+
+while IFS=$'\t' read -r SUBSCRIPTION_ID SUBSCRIPTION_NAME; do
+    [[ -z "$SUBSCRIPTION_ID" ]] && continue
+
+    ((TOTAL_COUNT++))
+
+    SCOPE="/subscriptions/$SUBSCRIPTION_ID"
+
+    # Check whether the role assignment exists
+    ROLE_COUNT=$(az role assignment list \
+        --assignee-object-id "$SP_OBJECT_ID" \
+        --scope "$SCOPE" \
+        --role "$ROLE_NAME" \
+        --query "length(@)" \
+        --output tsv 2>/dev/null)
+
+    COMMAND_STATUS=$?
+
+    if [[ "$COMMAND_STATUS" -ne 0 ]]; then
+        STATUS="ERROR"
+        ((ERROR_COUNT++))
+
+    elif [[ "$ROLE_COUNT" -gt 0 ]]; then
+        STATUS="ASSIGNED"
+        ((ASSIGNED_COUNT++))
+
+    else
+        STATUS="MISSING"
+        ((MISSING_COUNT++))
+    fi
+
+    printf "%-42s %-38s %-12s\n" \
+        "${SUBSCRIPTION_NAME:0:42}" \
+        "$SUBSCRIPTION_ID" \
+        "$STATUS"
+
+done <<< "$SUBSCRIPTIONS"
+
+echo
+echo "============================================================"
+echo "Summary"
+echo "============================================================"
+echo "Enabled subscriptions : $TOTAL_COUNT"
+echo "Role assigned         : $ASSIGNED_COUNT"
+echo "Missing assignment    : $MISSING_COUNT"
+echo "Verification errors   : $ERROR_COUNT"
+echo
+
+if [[ "$ERROR_COUNT" -gt 0 ]]; then
+    echo "RESULT: Verification completed with errors."
+    exit 2
+elif [[ "$MISSING_COUNT" -gt 0 ]]; then
+    echo "RESULT: The Service Principal is NOT assigned to all enabled subscriptions."
+    exit 1
+else
+    echo "RESULT: The Service Principal is assigned to all enabled subscriptions."
+    exit 0
+fi
